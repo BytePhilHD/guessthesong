@@ -140,6 +140,11 @@
             margin: 0 auto;
             padding-bottom: 8px;
         }
+
+        .spotify-login-container {
+            margin-top: auto;
+            padding-top: 8px;
+        }
     </style>
 </head>
 
@@ -179,6 +184,10 @@
         <button id="answerButton" class="btn btn-primary full-width answer-button" type="button">Antwort sagen</button>
         <button id="showAnswerButton" class="btn btn-primary full-width" type="button" hidden>Lösung anzeigen</button>
         <button id="guessAgainButton" class="btn btn-primary full-width" type="button" hidden>Weiter raten</button>
+
+        <div id="spotifyLoginContainer" class="full-width spotify-login-container" hidden>
+            <a class="btn btn-outline-light w-100" href="/spotify/login">Mit Spotify anmelden</a>
+        </div>
     </main>
     <script src="assets/bootstrap/js/bootstrap.min.js"></script>
     <script>
@@ -227,14 +236,22 @@
 
             const userButton = document.getElementById('userButton');
             const userNameLabel = document.getElementById('userNameLabel');
+            const spotifyLoginContainer = document.getElementById('spotifyLoginContainer');
 
             let playerName = null;
             let pendingNameMessage = null;
+
+            function updateSpotifyLoginVisibility() {
+                // Only show for the admin/test user
+                spotifyLoginContainer.hidden = (playerName !== 'Phil');
+            }
 
             function setPlayerName(newName) {
                 playerName = newName;
                 userNameLabel.textContent = newName;
                 setCookie('playerName', newName);
+
+                updateSpotifyLoginVisibility();
 
                 // tell server (or queue until WS is open)
                 pendingNameMessage = 'name:' + newName;
@@ -255,9 +272,7 @@
             if (queryName) {
                 setPlayerName(queryName);
             } else if (cookieName.length > 0) {
-                playerName = cookieName;
-                userNameLabel.textContent = cookieName;
-                pendingNameMessage = 'name:' + cookieName;
+                setPlayerName(cookieName);
             } else {
                 askForPlayerName();
             }
