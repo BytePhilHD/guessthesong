@@ -58,13 +58,42 @@
     <script src="assets/bootstrap/js/bootstrap.min.js"></script>
     <script>
         (function () {
+
+            function promptRequired(message) {
+                while (true) {
+                    let value = prompt(message);
+
+                    if (value === null) {
+                        // "Abbrechen" -> direkt wieder anzeigen
+                        continue;
+                    }
+
+                    value = value.trim();
+                    if (value.length === 0) {
+                        // leer -> direkt wieder anzeigen
+                        continue;
+                    }
+
+                    return value;
+                }
+            }
+
+            const playerName = promptRequired('Wie heißt du?');
+
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
             const wsUrl = `${protocol}://${window.location.host}/ws`;
 
             const socket = new WebSocket(wsUrl);
 
+            let pendingNameMessage = 'name:' + playerName;
+
             socket.addEventListener('open', () => {
                 console.log('WebSocket open:', wsUrl);
+
+                if (pendingNameMessage) {
+                    socket.send(pendingNameMessage);
+                    pendingNameMessage = null;
+                }
             });
 
             socket.addEventListener('message', (event) => {
@@ -81,8 +110,13 @@
 
             const answerButton = document.getElementById('answerButton');
             answerButton.addEventListener('click', () => {
+
                 if (socket.readyState === WebSocket.OPEN) {
-                    socket.send('answerButton:clicked');
+                    const messageObject = {
+                        type: 'playerGuess',
+                        playerName: playerName
+                    };
+                    socket.send('answer:' + JSON.stringify(messageObject));
                 } else {
                     console.log('WebSocket not open (state=' + socket.readyState + ')');
                 }
