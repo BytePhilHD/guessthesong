@@ -43,21 +43,168 @@
             height: 50vh;
             min-height: 220px;
             font-size: clamp(24px, 6vw, 40px);
+            transition: filter 140ms ease;
+        }
+
+        .answer-button.flash {
+            filter: brightness(1.35);
+        }
+
+        .user-badge {
+            position: fixed;
+            top: 12px;
+            right: 12px;
+            z-index: 10;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+        }
+
+        .user-icon {
+            width: 18px;
+            height: 18px;
+            display: inline-block;
+        }
+
+        .ws-warning {
+            position: fixed;
+            top: 12px;
+            left: 12px;
+            z-index: 10;
+            margin: 0;
+        }
+
+        .song-layer {
+            position: fixed;
+            inset: 0;
+            z-index: 20;
+            background: rgb(47, 52, 56);
+            display: flex;
+            flex-direction: column;
+            padding: 16px;
+        }
+
+        .song-layer-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            width: 100%;
+            max-width: 720px;
+            margin: 0 auto;
+        }
+
+        .song-layer-brand {
+            margin: 0;
+            text-align: left;
+        }
+
+        .song-layer-body {
+            flex: 1;
+            width: 100%;
+            max-width: 720px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 18px;
+            padding: 12px 0;
+        }
+
+        .song-album {
+            width: min(78vw, 320px);
+            aspect-ratio: 1 / 1;
+            object-fit: cover;
+        }
+
+        .song-title {
+            color: rgb(255, 255, 255);
+            text-align: center;
+            font-size: clamp(26px, 7vw, 44px);
+            font-weight: 700;
+            margin: 0;
+        }
+
+        .song-artists {
+            color: rgba(255, 255, 255, 0.75);
+            text-align: center;
+            font-size: clamp(16px, 4.8vw, 24px);
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .song-layer-footer {
+            max-width: 720px;
+            margin: 0 auto;
+            padding-bottom: 8px;
         }
     </style>
 </head>
 
 <body>
+    <div id="wsWarning" class="alert alert-danger py-2 px-3 ws-warning" role="alert" hidden>
+        Achtung: Keine Verbindung
+    </div>
+
+    <section id="songLayer" class="song-layer" hidden aria-hidden="true">
+        <div class="song-layer-header">
+            <div class="title song-layer-brand">GuessTheSong</div>
+            <button id="closeSongLayer" type="button" class="btn btn-outline-light btn-sm">Zurück</button>
+        </div>
+
+        <div class="song-layer-body">
+            <img id="songAlbumImage" class="song-album rounded" alt="Albumcover" hidden>
+            <h2 id="songTitle" class="song-title">Lade Song...</h2>
+            <p id="songArtists" class="song-artists">Lade Künstler...</p>
+        </div>
+
+        <div class="full-width song-layer-footer">
+            <button id="songLayerContinue" class="btn btn-primary w-100" type="button">Nächste Runde</button>
+        </div>
+    </section>
+
+    <button id="userButton" type="button" class="btn btn-outline-light user-badge" aria-label="Spielername ändern">
+        <svg class="user-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+            <path d="M14 14s-1-4-6-4-6 4-6 4 1 0 6 0 6 0 6 0z" />
+        </svg>
+        <span id="userNameLabel">...</span>
+    </button>
+
     <main class="page">
         <h1 class="title">GuessTheSong</h1>
 
         <button id="answerButton" class="btn btn-primary full-width answer-button" type="button">Antwort sagen</button>
-        <button class="btn btn-primary full-width" type="button">Lösung anzeigen</button>
-        <button class="btn btn-primary full-width" type="button">Weiter raten</button>
+        <button id="showAnswerButton" class="btn btn-primary full-width" type="button" hidden>Lösung anzeigen</button>
+        <button id="guessAgainButton" class="btn btn-primary full-width" type="button" hidden>Weiter raten</button>
     </main>
     <script src="assets/bootstrap/js/bootstrap.min.js"></script>
     <script>
         (function () {
+
+            function getCookie(name) {
+                const value = `; ${document.cookie}`;
+                const parts = value.split(`; ${name}=`);
+                if (parts.length === 2) {
+                    return decodeURIComponent(parts.pop().split(';').shift());
+                }
+                return null;
+            }
+
+            function setCookie(name, value) {
+                // 365 days
+                const maxAge = 60 * 60 * 24 * 365;
+                document.cookie = `${name}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; SameSite=Lax`;
+            }
+
+            function getNameFromQueryString() {
+                const params = new URLSearchParams(window.location.search);
+                // support both ?playerName= and ?name=
+                const fromQuery = (params.get('playerName') || params.get('name') || '').trim();
+                return fromQuery.length > 0 ? fromQuery : null;
+            }
 
             function promptRequired(message) {
                 while (true) {
@@ -78,48 +225,266 @@
                 }
             }
 
-            const playerName = promptRequired('Wie heißt du?');
+            const userButton = document.getElementById('userButton');
+            const userNameLabel = document.getElementById('userNameLabel');
+
+            let playerName = null;
+            let pendingNameMessage = null;
+
+            function setPlayerName(newName) {
+                playerName = newName;
+                userNameLabel.textContent = newName;
+                setCookie('playerName', newName);
+
+                // tell server (or queue until WS is open)
+                pendingNameMessage = 'name:' + newName;
+            }
+
+            function askForPlayerName() {
+                const name = promptRequired('Wie heißt du?');
+                setPlayerName(name);
+            }
+
+            userButton.addEventListener('click', () => {
+                askForPlayerName();
+            });
+
+            // Initialize name (query string overrides cookie)
+            const queryName = getNameFromQueryString();
+            const cookieName = (getCookie('playerName') || '').trim();
+            if (queryName) {
+                setPlayerName(queryName);
+            } else if (cookieName.length > 0) {
+                playerName = cookieName;
+                userNameLabel.textContent = cookieName;
+                pendingNameMessage = 'name:' + cookieName;
+            } else {
+                askForPlayerName();
+            }
 
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
             const wsUrl = `${protocol}://${window.location.host}/ws`;
 
-            const socket = new WebSocket(wsUrl);
+            const wsWarning = document.getElementById('wsWarning');
+            function setWsWarningVisible(visible) {
+                wsWarning.hidden = !visible;
+            }
 
-            let pendingNameMessage = 'name:' + playerName;
+            let socket = null;
+            let reconnectTimer = null;
 
-            socket.addEventListener('open', () => {
-                console.log('WebSocket open:', wsUrl);
+            const songLayer = document.getElementById('songLayer');
+            const closeSongLayerButton = document.getElementById('closeSongLayer');
+            const songLayerContinueButton = document.getElementById('songLayerContinue');
+            const guessAgainButton = document.getElementById('guessAgainButton');
+            const songAlbumImage = document.getElementById('songAlbumImage');
+            const songTitle = document.getElementById('songTitle');
+            const songArtists = document.getElementById('songArtists');
 
-                if (pendingNameMessage) {
-                    socket.send(pendingNameMessage);
-                    pendingNameMessage = null;
+            function showSongLayer() {
+                songLayer.hidden = false;
+                songLayer.setAttribute('aria-hidden', 'false');
+            }
+
+            function hideSongLayer() {
+                songLayer.hidden = true;
+                songLayer.setAttribute('aria-hidden', 'true');
+            }
+
+            function setSongInfo(info) {
+                const title = (info && (info.songTitle || info.title || info.name) || '—').toString();
+                const artists = (info && (info.artists || info.artist || info.interpret || info.artistsText) || '').toString();
+                const imageUrl = (info && (info.albumImageUrl || info.albumImage || info.imageUrl || info.coverUrl) || '').toString();
+
+                songTitle.textContent = title;
+                songArtists.textContent = artists || '—';
+
+                if (imageUrl) {
+                    songAlbumImage.src = imageUrl;
+                    songAlbumImage.hidden = false;
+                } else {
+                    songAlbumImage.hidden = true;
+                    songAlbumImage.removeAttribute('src');
+                }
+            }
+
+            closeSongLayerButton.addEventListener('click', hideSongLayer);
+
+            function sendNextRound() {
+                const messageObject = {
+                    type: 'nextRound',
+                    playerName: playerName
+                };
+                sendIfOpen(JSON.stringify(messageObject));
+            }
+
+            function sendGuessAgain() {
+                const messageObject = {
+                    type: 'guessAgain',
+                    playerName: playerName
+                };
+                sendIfOpen(JSON.stringify(messageObject));
+            }
+
+            songLayerContinueButton.addEventListener('click', () => {
+                hideSongLayer();
+                sendNextRound();
+            });
+
+            guessAgainButton.addEventListener('click', sendGuessAgain);
+
+            function stopReconnectLoop() {
+                if (reconnectTimer) {
+                    window.clearInterval(reconnectTimer);
+                    reconnectTimer = null;
+                }
+            }
+
+            function startReconnectLoop() {
+                // Requirement: try every 10 seconds after disconnect
+                if (reconnectTimer) {
+                    return;
+                }
+                reconnectTimer = window.setInterval(() => {
+                    if (!socket || socket.readyState === WebSocket.CLOSED) {
+                        connectWebSocket();
+                    }
+                }, 10_000);
+            }
+
+            function connectWebSocket() {
+                if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+                    return;
+                }
+
+                setWsWarningVisible(true);
+
+                socket = new WebSocket(wsUrl);
+
+                socket.addEventListener('open', () => {
+                    console.log('WebSocket open:', wsUrl);
+                    setWsWarningVisible(false);
+                    stopReconnectLoop();
+
+                    if (pendingNameMessage) {
+                        socket.send(pendingNameMessage);
+                        pendingNameMessage = null;
+                    }
+                });
+
+                socket.addEventListener('message', (event) => {
+                    console.log('WebSocket message:', event.data);
+                    try {
+                        const messageObject = JSON.parse(event.data);
+                        if (messageObject.type === 'firstGuesser') {
+                            const answerButton = document.getElementById('answerButton');
+                            answerButton.disabled = true;
+                            answerButton.textContent = `${messageObject.playerName} war der Erste!`;
+
+                            const showAnswerButton = document.getElementById('showAnswerButton');
+                            showAnswerButton.hidden = false;
+                        } else if (messageObject.type === 'answer') {
+                            setSongInfo(messageObject);
+                            showSongLayer();
+                        } else if (messageObject.type === 'guessAgain') {
+                            const answerButton = document.getElementById('answerButton');
+                            answerButton.disabled = false;
+                            answerButton.textContent = 'Antwort sagen';
+
+                            const showAnswerButton = document.getElementById('showAnswerButton');
+                            showAnswerButton.hidden = true;
+
+                            guessAgainButton.hidden = true;
+
+                            hideSongLayer();
+                        } else if (messageObject.type === 'nextRound' || messageObject.type === 'guessAgain') {
+                            const answerButton = document.getElementById('answerButton');
+                            answerButton.disabled = false;
+                            answerButton.textContent = 'Antwort sagen';
+
+                            const showAnswerButton = document.getElementById('showAnswerButton');
+                            showAnswerButton.hidden = true;
+
+                            guessAgainButton.hidden = true;
+
+                            setSongInfo(null);
+                            hideSongLayer();
+                        }
+                    } catch (err) {
+                        // ignore non-JSON messages
+                    }
+                });
+
+                socket.addEventListener('close', (event) => {
+                    console.log('WebSocket closed:', event.code, event.reason);
+                    setWsWarningVisible(true);
+                    startReconnectLoop();
+                });
+
+                socket.addEventListener('error', (err) => {
+                    console.log('WebSocket error:', err);
+                    setWsWarningVisible(true);
+                    startReconnectLoop();
+                });
+            }
+
+            function sendIfOpen(payload) {
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(payload);
+                    return true;
+                }
+                setWsWarningVisible(true);
+                console.log('WebSocket not open');
+                return false;
+            }
+
+            // initial connect
+            connectWebSocket();
+            startReconnectLoop();
+
+            // BFCache handling: when coming back, re-establish if needed
+            window.addEventListener('pageshow', () => {
+                if (!socket || socket.readyState !== WebSocket.OPEN) {
+                    setWsWarningVisible(true);
+                    connectWebSocket();
+                    startReconnectLoop();
                 }
             });
 
-            socket.addEventListener('message', (event) => {
-                console.log('WebSocket message:', event.data);
+            // If the page is put into BFCache, close the socket so pageshow can reconnect cleanly
+            window.addEventListener('pagehide', () => {
+                try {
+                    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+                        socket.close();
+                    }
+                } catch (e) {
+                    // ignore
+                }
             });
 
-            socket.addEventListener('close', (event) => {
-                console.log('WebSocket closed:', event.code, event.reason);
-            });
-
-            socket.addEventListener('error', (err) => {
-                console.log('WebSocket error:', err);
+            const showAnswerButton = document.getElementById('showAnswerButton');
+            showAnswerButton.addEventListener('click', () => {
+                const messageObject = {
+                    type: 'showAnswer',
+                    playerName: playerName
+                };
+                sendIfOpen(JSON.stringify(messageObject));
             });
 
             const answerButton = document.getElementById('answerButton');
             answerButton.addEventListener('click', () => {
 
-                if (socket.readyState === WebSocket.OPEN) {
-                    const messageObject = {
-                        type: 'playerGuess',
-                        playerName: playerName
-                    };
-                    socket.send('answer:' + JSON.stringify(messageObject));
-                } else {
-                    console.log('WebSocket not open (state=' + socket.readyState + ')');
-                }
+                answerButton.classList.add('flash');
+                window.setTimeout(() => answerButton.classList.remove('flash'), 160);
+
+                // Only show "Weiter raten" after the user has attempted a guess
+                guessAgainButton.hidden = false;
+
+                const messageObject = {
+                    type: 'playerGuess',
+                    playerName: playerName
+                };
+                sendIfOpen('answer:' + JSON.stringify(messageObject));
             });
         })();
     </script>
