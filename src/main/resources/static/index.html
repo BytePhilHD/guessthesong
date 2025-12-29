@@ -265,6 +265,29 @@
             let currentGenre = null;
             let spotifyConnected = null;
 
+            const GENRES = [
+                { value: 'rock', label: 'Rock' },
+                { value: 'pop', label: 'Pop' },
+                { value: 'electronic', label: 'Electronic' }
+            ];
+
+            function normalizeGenreValue(value) {
+                const v = (value || '').toString().trim().toLowerCase();
+                if (!v) {
+                    return null;
+                }
+                if (v.includes('rock')) return 'rock';
+                if (v.includes('pop')) return 'pop';
+                if (v.includes('electronic')) return 'electronic';
+                return v;
+            }
+
+            function genreLabelForValue(value) {
+                const normalized = normalizeGenreValue(value);
+                const match = GENRES.find(g => g.value === normalized);
+                return match ? match.label : (value || '—');
+            }
+
             function updateSpotifyLoginVisibility() {
                 // Only show for the admin/test user
                 spotifyLoginContainer.hidden = (playerName !== 'Phil');
@@ -278,9 +301,9 @@
             }
 
             function setCurrentGenre(newGenre) {
-                const normalized = (newGenre || '').toString().trim();
-                currentGenre = normalized.length > 0 ? normalized : null;
-                genreSubtitle.textContent = `Genre: ${currentGenre || '—'}`;
+                const normalized = normalizeGenreValue(newGenre);
+                currentGenre = normalized ? normalized : null;
+                genreSubtitle.textContent = `Genre: ${currentGenre ? genreLabelForValue(currentGenre) : '—'}`;
 
                 if (playerName === 'Phil') {
                     ensureGenresLoaded();
@@ -344,46 +367,25 @@
 
                 resetGenreSelect();
 
-                try {
-                    const response = await fetch('/songs/catalog', { cache: 'no-store' });
-                    if (!response.ok) {
-                        throw new Error('Failed to load catalog');
-                    }
-                    const catalog = await response.json();
-                    const categories = Array.isArray(catalog && catalog.categories) ? catalog.categories : [];
+                // Genres are now hardcoded (playlist-based mode).
+                genreSelect.replaceChildren();
 
-                    genreSelect.replaceChildren();
+                const placeholder = document.createElement('option');
+                placeholder.value = '';
+                placeholder.selected = true;
+                placeholder.disabled = true;
+                placeholder.textContent = 'Genre auswählen...';
+                genreSelect.appendChild(placeholder);
 
-                    const placeholder = document.createElement('option');
-                    placeholder.value = '';
-                    placeholder.selected = true;
-                    placeholder.disabled = true;
-                    placeholder.textContent = 'Genre auswählen...';
-                    genreSelect.appendChild(placeholder);
-
-                    for (const category of categories) {
-                        const label = ((category && category.label) || '').toString().trim();
-                        if (!label) {
-                            continue;
-                        }
-                        const option = document.createElement('option');
-                        option.value = label;
-                        option.textContent = label;
-                        genreSelect.appendChild(option);
-                    }
-
-                    genresLoaded = true;
-                    applyCurrentGenreToDropdown();
-                } catch (e) {
-                    // leave a disabled option so UX stays minimal but clear
-                    genreSelect.replaceChildren();
-                    const errorOption = document.createElement('option');
-                    errorOption.value = '';
-                    errorOption.disabled = true;
-                    errorOption.selected = true;
-                    errorOption.textContent = 'Genres konnten nicht geladen werden';
-                    genreSelect.appendChild(errorOption);
+                for (const g of GENRES) {
+                    const option = document.createElement('option');
+                    option.value = g.value;
+                    option.textContent = g.label;
+                    genreSelect.appendChild(option);
                 }
+
+                genresLoaded = true;
+                applyCurrentGenreToDropdown();
             }
 
             function setPlayerName(newName) {

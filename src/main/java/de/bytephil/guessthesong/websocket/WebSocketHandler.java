@@ -19,10 +19,7 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import de.bytephil.guessthesong.songs.SongItem;
-import de.bytephil.guessthesong.songs.SongRotationService;
 import de.bytephil.guessthesong.spotify.SpotifyService;
-import de.bytephil.guessthesong.spotify.SpotifyTrackUriResolver;
 import jakarta.servlet.http.HttpSession;
 import se.michaelthelin.spotify.SpotifyApi;
 import se.michaelthelin.spotify.enums.Action;
@@ -44,17 +41,58 @@ public class WebSocketHandler extends TextWebSocketHandler {
     private String selectedGenre = null;
 
     private final SpotifyService spotifyService;
-    private final SongRotationService songRotationService;
-    private final SpotifyTrackUriResolver spotifyTrackUriResolver;
 
     private final Object spotifyControlLock = new Object();
     private final AtomicLong spotifyRateLimitedUntilMs = new AtomicLong(0);
 
     private final Set<WebSocketSession> sessions = ConcurrentHashMap.newKeySet();
 
+        /**
+         * Optional: map a genre to a Spotify playlist context.
+         * Fill in your playlist IDs (the 22-char id from open.spotify.com/playlist/<id>). Example:
+         * spotify:playlist:37i9dQZF1DXcF6B6QPhFDv
+         */
+        private static final Map<String, String> GENRE_PLAYLIST_CONTEXT_URIS = Map.of(
+            "rock", "spotify:playlist:6pNlO5t2Rg7XrldHrsYbA7",
+            "pop", "",
+            "electronic", "");
+
     private static final Logger logger = LoggerFactory.getLogger(WebSocketHandler.class);
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    private static String normalizeGenreKey(String s) {
+        if (s == null) {
+            return null;
+        }
+        String trimmed = s.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        return trimmed.replaceAll("\\s+", " ").toLowerCase();
+    }
+
+    private static String playlistContextUriForGenre(String genreLabel) {
+        String key = normalizeGenreKey(genreLabel);
+        if (key == null) {
+            return null;
+        }
+
+        // Accept both label ("Rock") and id-like values ("rock")
+        if (key.contains("rock")) {
+            key = "rock";
+        } else if (key.contains("pop")) {
+            key = "pop";
+        } else if (key.contains("electronic")) {
+            key = "electronic";
+        }
+
+        String ctx = GENRE_PLAYLIST_CONTEXT_URIS.get(key);
+        if (ctx == null || ctx.isBlank()) {
+            return null;
+        }
+        return ctx.trim();
+    }
 
     private static String normalizeLabel(String s) {
         if (s == null) {
@@ -183,11 +221,8 @@ public class WebSocketHandler extends TextWebSocketHandler {
         return null;
     }
 
-    public WebSocketHandler(SpotifyService spotifyService, SongRotationService songRotationService,
-            SpotifyTrackUriResolver spotifyTrackUriResolver) {
+    public WebSocketHandler(SpotifyService spotifyService) {
         this.spotifyService = spotifyService;
-        this.songRotationService = songRotationService;
-        this.spotifyTrackUriResolver = spotifyTrackUriResolver;
     }
 
     @Override
@@ -257,8 +292,6 @@ public class WebSocketHandler extends TextWebSocketHandler {
                     SpotifyApi api = findSpotifyApiFromAnyConnectedSession();
                     guesserName = null;
 
-                    songRotationService.resetForGenre(selectedGenre);
-
                     if (api == null) {
                         logger.info("WS {} -> No Spotify session connected (newGame playback skipped)",
                                 session.getId());
@@ -272,26 +305,17 @@ public class WebSocketHandler extends TextWebSocketHandler {
                                     return;
                                 }
 
-                                SongItem nextSong = songRotationService.nextSong();
-                                if (nextSong == null) {
-                                    logger.info("WS {} -> No next song available (genre={})", session.getId(),
-                                            selectedGenre);
+                                String playlistCtx = playlistContextUriForGenre(selectedGenre);
+                                if (playlistCtx == null) {
+                                    logger.info("WS {} -> No playlist configured for genre='{}' (newGame skipped)",
+                                            session.getId(), selectedGenre);
                                 } else {
-                                    String query = songRotationService.buildSpotifyQuery(nextSong);
-                                    if (query == null || query.isBlank()) {
-                                        logger.info("WS {} -> Next song has no query/title (genre={})",
-                                                session.getId(), selectedGenre);
-                                    } else {
-                                        String uri = spotifyTrackUriResolver.resolveTrackUri(api, query);
-                                        if (uri == null || uri.isBlank()) {
-                                            logger.info(
-                                                    "WS {} -> Spotify search returned no tracks for query='{}'",
-                                                    session.getId(), query);
-                                        } else {
-                                            api.addItemToUsersPlaybackQueue(uri).build().execute();
-                                            api.skipUsersPlaybackToNextTrack().build().execute();
-                                        }
-                                    }
+                                    // Playlist-only mode: avoid search entirely.
+                                    api.toggleShuffleForUsersPlayback(true).build().execute();
+                                    api.startResumeUsersPlayback().context_uri(playlistCtx).build().execute();
+                                    api.skipUsersPlaybackToNextTrack().build().execute();
+                                    logger.info("WS {} -> spotify newGame using playlist context {}",
+                                            session.getId(), playlistCtx);
                                 }
                             }
                         } catch (TooManyRequestsException e) {
@@ -304,8 +328,6 @@ public class WebSocketHandler extends TextWebSocketHandler {
                 } else if ("genreChange".equals(clientMessage.type)) {
                     selectedGenre = normalizeLabel(clientMessage.genreName);
                     logger.info("WS {} -> Genre selected: {}", session.getId(), selectedGenre);
-
-                    songRotationService.resetForGenre(selectedGenre);
 
                     String genreChangeJson = objectMapper.writeValueAsString(
                             Map.of("type", "genreChange", "genreName", selectedGenre != null ? selectedGenre : ""));
@@ -437,35 +459,8 @@ public class WebSocketHandler extends TextWebSocketHandler {
 
                                 CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
 
-                                // If a genre is selected, keep rotation aligned.
-                                if (selectedGenre != null && !selectedGenre.isBlank()) {
-                                    String currentRotationGenre = songRotationService.getCurrentGenreLabel();
-                                    if (currentRotationGenre == null
-                                            || !currentRotationGenre.equalsIgnoreCase(selectedGenre)) {
-                                        songRotationService.resetForGenre(selectedGenre);
-                                    }
-                                }
-
-                                SongItem nextSong = songRotationService.nextSong();
-                                if (nextSong == null) {
-                                    logger.info("WS {} -> No next song available (genre={})", session.getId(),
-                                            selectedGenre);
-                                } else {
-                                    String query = songRotationService.buildSpotifyQuery(nextSong);
-                                    if (query == null || query.isBlank()) {
-                                        logger.info("WS {} -> Next song has no query/title (genre={})", session.getId(),
-                                                selectedGenre);
-                                    } else {
-                                        String uri = spotifyTrackUriResolver.resolveTrackUri(api, query);
-                                        if (uri == null || uri.isBlank()) {
-                                            logger.info("WS {} -> Spotify search returned no tracks for query='{}'",
-                                                    session.getId(), query);
-                                        } else {
-                                            api.addItemToUsersPlaybackQueue(uri).build().execute();
-                                            api.skipUsersPlaybackToNextTrack().build().execute();
-                                        }
-                                    }
-                                }
+                                // Playlist-only mode: just skip. (Shuffle is enabled at newGame.)
+                                api.skipUsersPlaybackToNextTrack().build().execute();
 
                                 if (deviceSupportsVolume(playback)) {
                                     api.setVolumeForUsersPlayback(100).build().execute();
