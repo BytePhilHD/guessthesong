@@ -30,8 +30,10 @@ public class SpotifyApiController {
 
     @GetMapping("/spotify/status")
     public Object status(HttpSession session) {
+        boolean globalAuthed = spotifyService.getGlobalToken() != null;
         return java.util.Map.of(
-                "authenticated", spotifyService.getToken(session) != null);
+            "authenticated", spotifyService.getToken(session) != null,
+            "globalAuthenticated", globalAuthed);
     }
 
     @GetMapping("/spotify/config-check")
@@ -48,7 +50,10 @@ public class SpotifyApiController {
 
     @GetMapping("/spotify/current")
     public ResponseEntity<?> current(HttpSession session) throws Exception {
-        SpotifyApi api = spotifyService.apiForSession(session);
+        SpotifyApi api = spotifyService.apiForGlobal();
+        if (api == null) {
+            api = spotifyService.apiForSession(session);
+        }
         if (api == null) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(java.util.Map.of("error", "not_authenticated"));

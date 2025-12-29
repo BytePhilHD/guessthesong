@@ -33,7 +33,8 @@ public class SpotifyAuthController {
 
     @GetMapping("/spotify/login")
     public RedirectView login(HttpSession session, HttpServletResponse response) throws Exception {
-        if (isBlank(properties.getClientId()) || isBlank(properties.getClientSecret()) || isBlank(properties.getRedirectUri())) {
+        if (isBlank(properties.getClientId()) || isBlank(properties.getClientSecret())
+                || isBlank(properties.getRedirectUri())) {
             return new RedirectView("/?spotifyError=missing_spotify_config");
         }
 
@@ -93,17 +94,7 @@ public class SpotifyAuthController {
 
         SpotifySessionToken token = spotifyService.exchangeCodeForToken(code);
         spotifyService.setToken(session, token);
-
-        if (properties.isPauseOnConnect()) {
-            try {
-                SpotifyApi api = spotifyService.apiForSession(session);
-                if (api != null) {
-                    api.pauseUsersPlayback().build().execute();
-                }
-            } catch (Exception e) {
-                logger.info("Spotify pause-on-connect failed (often no active device): {}", e.getMessage());
-            }
-        }
+        spotifyService.setGlobalToken(token);
 
         return new RedirectView("/?spotify=connected");
     }
@@ -111,6 +102,7 @@ public class SpotifyAuthController {
     @GetMapping("/spotify/logout")
     public RedirectView logout(HttpSession session) {
         spotifyService.clearToken(session);
+        spotifyService.clearGlobalToken();
         return new RedirectView("/?spotify=logged_out");
     }
 
