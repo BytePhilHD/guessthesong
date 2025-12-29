@@ -67,9 +67,9 @@ public class SpotifyApiController {
 
         Track track = (Track) currentlyPlaying.getItem();
 
-        String artists = "";
+        String artistsText = "";
         if (track.getArtists() != null) {
-            artists = java.util.Arrays.stream(track.getArtists())
+            artistsText = java.util.Arrays.stream(track.getArtists())
                     .map(ArtistSimplified::getName)
                     .filter(n -> n != null && !n.isBlank())
                     .reduce((a, b) -> a + ", " + b)
@@ -87,7 +87,7 @@ public class SpotifyApiController {
         return ResponseEntity.ok(java.util.Map.of(
                 "type", "answer",
                 "songTitle", track.getName(),
-                "artists", artists,
+            "artistsText", artistsText,
                 "albumImageUrl", albumImageUrl));
     }
 }

@@ -200,6 +200,7 @@
             <select id="genreSelect" class="form-select mt-2" aria-label="Genre auswählen">
                 <option value="" selected disabled>Genres laden...</option>
             </select>
+            <button id="newGameButton" class="btn btn-outline-light w-100 mt-2" type="button">Neues Spiel starten</button>
         </div>
     </main>
     <script src="assets/bootstrap/js/bootstrap.min.js"></script>
@@ -253,10 +254,12 @@
             const spotifyLoginButton = document.getElementById('spotifyLoginButton');
             const genreSelect = document.getElementById('genreSelect');
             const genreSubtitle = document.getElementById('genreSubtitle');
+            const newGameButton = document.getElementById('newGameButton');
 
             let playerName = null;
             let pendingNameMessage = null;
             let pendingGenreChangePayload = null;
+            let pendingNewGamePayload = null;
             let genresLoaded = false;
 
             let currentGenre = null;
@@ -454,11 +457,12 @@
 
             function setSongInfo(info) {
                 const title = (info && (info.songTitle || info.title || info.name) || '—').toString();
-                const artists = (info && (info.artists || info.artist || info.interpret || info.artistsText) || '').toString();
+                const rawArtists = (info && (info.artistsText ?? info.artists ?? info.artist ?? info.interpret) || '');
+                const artistsText = Array.isArray(rawArtists) ? rawArtists.filter(Boolean).join(', ') : rawArtists.toString();
                 const imageUrl = (info && (info.albumImageUrl || info.albumImage || info.imageUrl || info.coverUrl) || '').toString();
 
                 songTitle.textContent = title;
-                songArtists.textContent = artists || '—';
+                songArtists.textContent = artistsText || '—';
 
                 if (imageUrl) {
                     songAlbumImage.src = imageUrl;
@@ -535,6 +539,11 @@
                     if (pendingGenreChangePayload) {
                         socket.send(pendingGenreChangePayload);
                         pendingGenreChangePayload = null;
+                    }
+
+                    if (pendingNewGamePayload) {
+                        socket.send(pendingNewGamePayload);
+                        pendingNewGamePayload = null;
                     }
                 });
 
@@ -633,6 +642,38 @@
                 const sent = sendIfOpen(payload);
                 if (!sent) {
                     pendingGenreChangePayload = payload;
+                }
+            });
+
+            newGameButton.addEventListener('click', () => {
+                if (playerName !== 'Phil') {
+                    return;
+                }
+
+                const selectedGenre = (genreSelect && genreSelect.value || '').toString().trim();
+                if (!selectedGenre) {
+                    window.alert('Bitte zuerst ein Genre auswählen.');
+                    try { genreSelect.focus(); } catch (e) { /* ignore */ }
+                    return;
+                }
+
+                const confirmed = window.confirm('Neues Spiel wirklich starten?');
+                if (!confirmed) {
+                    return;
+                }
+
+                const genreName = selectedGenre;
+
+                const payload = JSON.stringify({
+                    type: 'newGame',
+                    playerName: playerName
+                    ,
+                    genreName: genreName
+                });
+
+                const sent = sendIfOpen(payload);
+                if (!sent) {
+                    pendingNewGamePayload = payload;
                 }
             });
 

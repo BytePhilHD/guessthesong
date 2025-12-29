@@ -6,6 +6,7 @@ import java.util.EnumSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,12 +16,17 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import de.bytephil.guessthesong.songs.SongItem;
+import de.bytephil.guessthesong.songs.SongRotationService;
 import de.bytephil.guessthesong.spotify.SpotifyService;
+import de.bytephil.guessthesong.spotify.SpotifyTrackUriResolver;
 import jakarta.servlet.http.HttpSession;
 import se.michaelthelin.spotify.SpotifyApi;
 import se.michaelthelin.spotify.enums.Action;
+import se.michaelthelin.spotify.exceptions.detailed.TooManyRequestsException;
 import se.michaelthelin.spotify.model_objects.miscellaneous.CurrentlyPlaying;
 import se.michaelthelin.spotify.model_objects.miscellaneous.CurrentlyPlayingContext;
 import se.michaelthelin.spotify.model_objects.miscellaneous.Device;
@@ -38,6 +44,11 @@ public class WebSocketHandler extends TextWebSocketHandler {
     private String selectedGenre = null;
 
     private final SpotifyService spotifyService;
+    private final SongRotationService songRotationService;
+    private final SpotifyTrackUriResolver spotifyTrackUriResolver;
+
+    private final Object spotifyControlLock = new Object();
+    private final AtomicLong spotifyRateLimitedUntilMs = new AtomicLong(0);
 
     private final Set<WebSocketSession> sessions = ConcurrentHashMap.newKeySet();
 
@@ -45,9 +56,34 @@ public class WebSocketHandler extends TextWebSocketHandler {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    private static String normalizeLabel(String s) {
+        if (s == null) {
+            return null;
+        }
+        String trimmed = s.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        return trimmed.replaceAll("\\s+", " ");
+    }
+
+    private boolean isSpotifyRateLimitedNow() {
+        return System.currentTimeMillis() < spotifyRateLimitedUntilMs.get();
+    }
+
+    private void markSpotifyRateLimited(TooManyRequestsException e, String wsId, String action) {
+        int retryAfterSeconds = e != null ? e.getRetryAfter() : 1;
+        long until = System.currentTimeMillis() + Math.max(1, retryAfterSeconds) * 1000L;
+        spotifyRateLimitedUntilMs.set(until);
+        logger.warn("WS {} -> Spotify rate limited during {} (retryAfter={}s)", wsId, action, retryAfterSeconds);
+    }
+
     private CurrentlyPlayingContext safeGetPlayback(SpotifyApi api, String wsId) {
         try {
             return api.getInformationAboutUsersCurrentPlayback().build().execute();
+        } catch (TooManyRequestsException e) {
+            markSpotifyRateLimited(e, wsId, "getPlayback");
+            return null;
         } catch (Exception e) {
             logger.warn("WS {} -> spotify get playback failed", wsId, e);
             return null;
@@ -147,8 +183,11 @@ public class WebSocketHandler extends TextWebSocketHandler {
         return null;
     }
 
-    public WebSocketHandler(SpotifyService spotifyService) {
+    public WebSocketHandler(SpotifyService spotifyService, SongRotationService songRotationService,
+            SpotifyTrackUriResolver spotifyTrackUriResolver) {
         this.spotifyService = spotifyService;
+        this.songRotationService = songRotationService;
+        this.spotifyTrackUriResolver = spotifyTrackUriResolver;
     }
 
     @Override
@@ -201,22 +240,78 @@ public class WebSocketHandler extends TextWebSocketHandler {
         }
 
         if (jsonPayload != null && jsonPayload.trim().startsWith("{")) {
+            ClientMessage clientMessage;
             try {
-                ClientMessage clientMessage = objectMapper.readValue(jsonPayload, ClientMessage.class);
+                clientMessage = objectMapper.readValue(jsonPayload, ClientMessage.class);
+            } catch (JsonProcessingException e) {
+                logger.info("WS {} -> invalid JSON: {}", session.getId(), jsonPayload, e);
+                return;
+            }
+
+            try {
                 logger.info("WS {} -> type={}, playerName={}", session.getId(), clientMessage.type,
                         clientMessage.playerName);
 
-                if ("genreChange".equals(clientMessage.type)) {
-                    String newGenre = clientMessage.genreName;
-                    selectedGenre = (newGenre != null && !newGenre.isBlank()) ? newGenre : null;
+                if ("newGame".equals(clientMessage.type)) {
+                    selectedGenre = normalizeLabel(clientMessage.genreName);
+                    SpotifyApi api = findSpotifyApiFromAnyConnectedSession();
+                    guesserName = null;
+
+                    songRotationService.resetForGenre(selectedGenre);
+
+                    if (api == null) {
+                        logger.info("WS {} -> No Spotify session connected (newGame playback skipped)",
+                                session.getId());
+                    } else if (isSpotifyRateLimitedNow()) {
+                        logger.info("WS {} -> spotify newGame skipped (rate limited)", session.getId());
+                    } else {
+                        try {
+                            synchronized (spotifyControlLock) {
+                                if (isSpotifyRateLimitedNow()) {
+                                    logger.info("WS {} -> spotify newGame skipped (rate limited)", session.getId());
+                                    return;
+                                }
+
+                                SongItem nextSong = songRotationService.nextSong();
+                                if (nextSong == null) {
+                                    logger.info("WS {} -> No next song available (genre={})", session.getId(),
+                                            selectedGenre);
+                                } else {
+                                    String query = songRotationService.buildSpotifyQuery(nextSong);
+                                    if (query == null || query.isBlank()) {
+                                        logger.info("WS {} -> Next song has no query/title (genre={})",
+                                                session.getId(), selectedGenre);
+                                    } else {
+                                        String uri = spotifyTrackUriResolver.resolveTrackUri(api, query);
+                                        if (uri == null || uri.isBlank()) {
+                                            logger.info(
+                                                    "WS {} -> Spotify search returned no tracks for query='{}'",
+                                                    session.getId(), query);
+                                        } else {
+                                            api.addItemToUsersPlaybackQueue(uri).build().execute();
+                                            api.skipUsersPlaybackToNextTrack().build().execute();
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (TooManyRequestsException e) {
+                            markSpotifyRateLimited(e, session.getId(), "newGame");
+                        } catch (Exception e) {
+                            logger.warn("WS {} -> spotify newGame failed", session.getId(), e);
+                        }
+                    }
+
+                } else if ("genreChange".equals(clientMessage.type)) {
+                    selectedGenre = normalizeLabel(clientMessage.genreName);
                     logger.info("WS {} -> Genre selected: {}", session.getId(), selectedGenre);
+
+                    songRotationService.resetForGenre(selectedGenre);
+
                     String genreChangeJson = objectMapper.writeValueAsString(
                             Map.of("type", "genreChange", "genreName", selectedGenre != null ? selectedGenre : ""));
                     lastBroadcast = genreChangeJson;
                     broadcast(genreChangeJson);
-                }
-
-                else if ("playerGuess".equals(clientMessage.type) && guesserName == null) {
+                } else if ("playerGuess".equals(clientMessage.type) && guesserName == null) {
                     guesserName = clientMessage.playerName;
                     logger.info("WS {} -> Guesser set to {}", session.getId(), guesserName);
 
@@ -228,18 +323,30 @@ public class WebSocketHandler extends TextWebSocketHandler {
                     SpotifyApi api = findSpotifyApiFromAnyConnectedSession();
                     if (api == null) {
                         logger.info("WS {} -> No Spotify session connected (pause skipped)", session.getId());
+                    } else if (isSpotifyRateLimitedNow()) {
+                        logger.info("WS {} -> spotify pause skipped (rate limited)", session.getId());
                     } else {
                         try {
-                            CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
-                            Boolean isPlaying = playback != null ? playback.getIs_playing() : null;
-                            if (Boolean.FALSE.equals(isPlaying)) {
-                                logger.info("WS {} -> spotify pause skipped (already not playing)", session.getId());
-                            } else if (!canPause(playback)) {
-                                logger.info("WS {} -> spotify pause skipped (disallowed by Spotify)", session.getId());
-                            } else {
-                                api.pauseUsersPlayback().build().execute();
-                                logger.info("WS {} -> spotify pause executed", session.getId());
+                            synchronized (spotifyControlLock) {
+                                if (isSpotifyRateLimitedNow()) {
+                                    logger.info("WS {} -> spotify pause skipped (rate limited)", session.getId());
+                                } else {
+                                    CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
+                                    Boolean isPlaying = playback != null ? playback.getIs_playing() : null;
+                                    if (Boolean.FALSE.equals(isPlaying)) {
+                                        logger.info("WS {} -> spotify pause skipped (already not playing)",
+                                                session.getId());
+                                    } else if (!canPause(playback)) {
+                                        logger.info("WS {} -> spotify pause skipped (disallowed by Spotify)",
+                                                session.getId());
+                                    } else {
+                                        api.pauseUsersPlayback().build().execute();
+                                        logger.info("WS {} -> spotify pause executed", session.getId());
+                                    }
+                                }
                             }
+                        } catch (TooManyRequestsException e) {
+                            markSpotifyRateLimited(e, session.getId(), "pause");
                         } catch (Exception e) {
                             logger.warn("WS {} -> spotify pause failed", session.getId(), e);
                         }
@@ -252,42 +359,54 @@ public class WebSocketHandler extends TextWebSocketHandler {
                     SpotifyApi api = findSpotifyApiFromAnyConnectedSession();
                     if (api == null) {
                         logger.info("WS {} -> No Spotify session connected (resume skipped)", session.getId());
+                    } else if (isSpotifyRateLimitedNow()) {
+                        logger.info("WS {} -> spotify resume skipped (rate limited)", session.getId());
                     } else {
                         try {
-                            CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
-                            Boolean isPlaying = playback != null ? playback.getIs_playing() : null;
-
-                            CurrentlyPlaying current = api.getUsersCurrentlyPlayingTrack().build().execute();
-                            Track track = null;
-                            if (current != null && current.getItem() instanceof Track t) {
-                                track = t;
-                            }
-
-                            String songTitle = track != null ? track.getName() : null;
-                            String artistsText = track != null ? artistsToText(track.getArtists()) : "";
-                            String albumImageUrl = firstAlbumImageUrl(track);
-
-                            String answerJson = objectMapper.writeValueAsString(
-                                    Map.of(
-                                            "type", "answer",
-                                            "songTitle", songTitle != null ? songTitle : "",
-                                            "artistsText", artistsText,
-                                            "albumImageUrl", albumImageUrl != null ? albumImageUrl : ""));
-                            lastBroadcast = answerJson;
-                            broadcast(answerJson);
-                            guesserName = null;
-
-                            if (Boolean.TRUE.equals(isPlaying)) {
-                                logger.info("WS {} -> spotify resume skipped (already playing)", session.getId());
-                            } else if (!canResume(playback)) {
-                                logger.info("WS {} -> spotify resume skipped (disallowed by Spotify)", session.getId());
-                            } else {
-                                api.startResumeUsersPlayback().build().execute();
-                                if (deviceSupportsVolume(playback)) {
-                                    api.setVolumeForUsersPlayback(75).build().execute();
+                            synchronized (spotifyControlLock) {
+                                if (isSpotifyRateLimitedNow()) {
+                                    logger.info("WS {} -> spotify resume skipped (rate limited)", session.getId());
+                                    return;
                                 }
-                                logger.info("WS {} -> spotify resume executed", session.getId());
+
+                                CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
+                                Boolean isPlaying = playback != null ? playback.getIs_playing() : null;
+
+                                CurrentlyPlaying current = api.getUsersCurrentlyPlayingTrack().build().execute();
+                                Track track = null;
+                                if (current != null && current.getItem() instanceof Track t) {
+                                    track = t;
+                                }
+
+                                String songTitle = track != null ? track.getName() : null;
+                                String artistsText = track != null ? artistsToText(track.getArtists()) : "";
+                                String albumImageUrl = firstAlbumImageUrl(track);
+
+                                String answerJson = objectMapper.writeValueAsString(
+                                        Map.of(
+                                                "type", "answer",
+                                                "songTitle", songTitle != null ? songTitle : "",
+                                                "artistsText", artistsText,
+                                                "albumImageUrl", albumImageUrl != null ? albumImageUrl : ""));
+                                lastBroadcast = answerJson;
+                                broadcast(answerJson);
+                                guesserName = null;
+
+                                if (Boolean.TRUE.equals(isPlaying)) {
+                                    logger.info("WS {} -> spotify resume skipped (already playing)", session.getId());
+                                } else if (!canResume(playback)) {
+                                    logger.info("WS {} -> spotify resume skipped (disallowed by Spotify)",
+                                            session.getId());
+                                } else {
+                                    api.startResumeUsersPlayback().build().execute();
+                                    if (deviceSupportsVolume(playback)) {
+                                        api.setVolumeForUsersPlayback(85).build().execute();
+                                    }
+                                    logger.info("WS {} -> spotify resume executed", session.getId());
+                                }
                             }
+                        } catch (TooManyRequestsException e) {
+                            markSpotifyRateLimited(e, session.getId(), "showAnswer/resume");
                         } catch (Exception e) {
                             logger.warn("WS {} -> spotify resume failed", session.getId(), e);
                         }
@@ -306,28 +425,56 @@ public class WebSocketHandler extends TextWebSocketHandler {
                     SpotifyApi api = findSpotifyApiFromAnyConnectedSession();
                     if (api == null) {
                         logger.info("WS {} -> No Spotify session connected (resume skipped)", session.getId());
+                    } else if (isSpotifyRateLimitedNow()) {
+                        logger.info("WS {} -> spotify nextRound skipped (rate limited)", session.getId());
                     } else {
                         try {
-                            CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
+                            synchronized (spotifyControlLock) {
+                                if (isSpotifyRateLimitedNow()) {
+                                    logger.info("WS {} -> spotify nextRound skipped (rate limited)", session.getId());
+                                    return;
+                                }
 
-                            var searchResult = api.searchTracks("End of You - Amy Lee, Poppy")
-                                    .limit(1)
-                                    .build()
-                                    .execute();
-                            Track[] foundTracks = searchResult != null ? searchResult.getItems() : null;
-                            Track track = (foundTracks != null && foundTracks.length > 0) ? foundTracks[0] : null;
-                            if (track == null) {
-                                logger.info("WS {} -> Spotify search returned no tracks", session.getId());
-                            } else {
-                                api.addItemToUsersPlaybackQueue(track.getUri()).build().execute();
-                                api.skipUsersPlaybackToNextTrack().build().execute();
-                            }
+                                CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
 
-                            if (deviceSupportsVolume(playback)) {
-                                api.setVolumeForUsersPlayback(100).build().execute();
+                                // If a genre is selected, keep rotation aligned.
+                                if (selectedGenre != null && !selectedGenre.isBlank()) {
+                                    String currentRotationGenre = songRotationService.getCurrentGenreLabel();
+                                    if (currentRotationGenre == null
+                                            || !currentRotationGenre.equalsIgnoreCase(selectedGenre)) {
+                                        songRotationService.resetForGenre(selectedGenre);
+                                    }
+                                }
+
+                                SongItem nextSong = songRotationService.nextSong();
+                                if (nextSong == null) {
+                                    logger.info("WS {} -> No next song available (genre={})", session.getId(),
+                                            selectedGenre);
+                                } else {
+                                    String query = songRotationService.buildSpotifyQuery(nextSong);
+                                    if (query == null || query.isBlank()) {
+                                        logger.info("WS {} -> Next song has no query/title (genre={})", session.getId(),
+                                                selectedGenre);
+                                    } else {
+                                        String uri = spotifyTrackUriResolver.resolveTrackUri(api, query);
+                                        if (uri == null || uri.isBlank()) {
+                                            logger.info("WS {} -> Spotify search returned no tracks for query='{}'",
+                                                    session.getId(), query);
+                                        } else {
+                                            api.addItemToUsersPlaybackQueue(uri).build().execute();
+                                            api.skipUsersPlaybackToNextTrack().build().execute();
+                                        }
+                                    }
+                                }
+
+                                if (deviceSupportsVolume(playback)) {
+                                    api.setVolumeForUsersPlayback(100).build().execute();
+                                }
                             }
+                        } catch (TooManyRequestsException e) {
+                            markSpotifyRateLimited(e, session.getId(), "nextRound");
                         } catch (Exception e) {
-                            logger.warn("WS {} -> spotify resume failed", session.getId(), e);
+                            logger.warn("WS {} -> spotify nextRound failed", session.getId(), e);
                         }
                     }
                 } else if ("guessAgain".equals(clientMessage.type)) {
@@ -340,24 +487,36 @@ public class WebSocketHandler extends TextWebSocketHandler {
                     SpotifyApi api = findSpotifyApiFromAnyConnectedSession();
                     if (api == null) {
                         logger.info("WS {} -> No Spotify session connected (resume skipped)", session.getId());
+                    } else if (isSpotifyRateLimitedNow()) {
+                        logger.info("WS {} -> spotify resume skipped (rate limited)", session.getId());
                     } else {
                         try {
-                            CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
-                            Boolean isPlaying = playback != null ? playback.getIs_playing() : null;
-                            if (Boolean.TRUE.equals(isPlaying)) {
-                                if (deviceSupportsVolume(playback)) {
-                                    api.setVolumeForUsersPlayback(100).build().execute();
+                            synchronized (spotifyControlLock) {
+                                if (isSpotifyRateLimitedNow()) {
+                                    logger.info("WS {} -> spotify resume skipped (rate limited)", session.getId());
+                                    return;
                                 }
-                                logger.info("WS {} -> spotify resume skipped (already playing)", session.getId());
-                            } else if (!canResume(playback)) {
-                                logger.info("WS {} -> spotify resume skipped (disallowed by Spotify)", session.getId());
-                            } else {
-                                api.startResumeUsersPlayback().build().execute();
-                                if (deviceSupportsVolume(playback)) {
-                                    api.setVolumeForUsersPlayback(100).build().execute();
+
+                                CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
+                                Boolean isPlaying = playback != null ? playback.getIs_playing() : null;
+                                if (Boolean.TRUE.equals(isPlaying)) {
+                                    if (deviceSupportsVolume(playback)) {
+                                        api.setVolumeForUsersPlayback(100).build().execute();
+                                    }
+                                    logger.info("WS {} -> spotify resume skipped (already playing)", session.getId());
+                                } else if (!canResume(playback)) {
+                                    logger.info("WS {} -> spotify resume skipped (disallowed by Spotify)",
+                                            session.getId());
+                                } else {
+                                    api.startResumeUsersPlayback().build().execute();
+                                    if (deviceSupportsVolume(playback)) {
+                                        api.setVolumeForUsersPlayback(100).build().execute();
+                                    }
+                                    logger.info("WS {} -> spotify resume executed", session.getId());
                                 }
-                                logger.info("WS {} -> spotify resume executed", session.getId());
                             }
+                        } catch (TooManyRequestsException e) {
+                            markSpotifyRateLimited(e, session.getId(), "guessAgain/resume");
                         } catch (Exception e) {
                             logger.warn("WS {} -> spotify resume failed", session.getId(), e);
                         }
@@ -365,7 +524,7 @@ public class WebSocketHandler extends TextWebSocketHandler {
                 }
 
             } catch (Exception e) {
-                logger.info("WS {} -> invalid JSON: {}", session.getId(), jsonPayload);
+                logger.warn("WS {} -> message handling failed: {}", session.getId(), jsonPayload, e);
             }
         }
     }
