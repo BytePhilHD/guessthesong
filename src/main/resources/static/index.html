@@ -145,6 +145,14 @@
             margin-top: auto;
             padding-top: 8px;
         }
+
+        .genre-subtitle {
+            color: rgba(255, 255, 255, 0.75);
+            text-align: center;
+            margin: -6px 0 8px 0;
+            font-weight: 600;
+            font-size: 14px;
+        }
     </style>
 </head>
 
@@ -180,13 +188,18 @@
 
     <main class="page">
         <h1 class="title">GuessTheSong</h1>
+        <div id="genreSubtitle" class="genre-subtitle">Genre: —</div>
 
         <button id="answerButton" class="btn btn-primary full-width answer-button" type="button">Antwort sagen</button>
         <button id="showAnswerButton" class="btn btn-primary full-width" type="button" hidden>Lösung anzeigen</button>
         <button id="guessAgainButton" class="btn btn-primary full-width" type="button" hidden>Weiter raten</button>
 
         <div id="spotifyLoginContainer" class="full-width spotify-login-container" hidden>
-            <a class="btn btn-outline-light w-100" href="/spotify/login">Mit Spotify anmelden</a>
+            <a id="spotifyLoginButton" class="btn btn-outline-light w-100" href="/spotify/login">Mit Spotify
+                anmelden</a>
+            <select id="genreSelect" class="form-select mt-2" aria-label="Genre auswählen">
+                <option value="" selected disabled>Genres laden...</option>
+            </select>
         </div>
     </main>
     <script src="assets/bootstrap/js/bootstrap.min.js"></script>
@@ -237,13 +250,137 @@
             const userButton = document.getElementById('userButton');
             const userNameLabel = document.getElementById('userNameLabel');
             const spotifyLoginContainer = document.getElementById('spotifyLoginContainer');
+            const spotifyLoginButton = document.getElementById('spotifyLoginButton');
+            const genreSelect = document.getElementById('genreSelect');
+            const genreSubtitle = document.getElementById('genreSubtitle');
 
             let playerName = null;
             let pendingNameMessage = null;
+            let pendingGenreChangePayload = null;
+            let genresLoaded = false;
+
+            let currentGenre = null;
+            let spotifyConnected = null;
 
             function updateSpotifyLoginVisibility() {
                 // Only show for the admin/test user
                 spotifyLoginContainer.hidden = (playerName !== 'Phil');
+
+                if (playerName === 'Phil') {
+                    ensureGenresLoaded();
+                } else {
+                    // keep dropdown quiet for non-Phil users
+                    resetGenreSelect();
+                }
+            }
+
+            function setCurrentGenre(newGenre) {
+                const normalized = (newGenre || '').toString().trim();
+                currentGenre = normalized.length > 0 ? normalized : null;
+                genreSubtitle.textContent = `Genre: ${currentGenre || '—'}`;
+
+                if (playerName === 'Phil') {
+                    ensureGenresLoaded();
+                    applyCurrentGenreToDropdown();
+                }
+            }
+
+            function setSpotifyConnected(newValue) {
+                // Only relevant for Phil; container is hidden otherwise
+                if (playerName !== 'Phil') {
+                    spotifyConnected = null;
+                    return;
+                }
+
+                spotifyConnected = (newValue === true);
+
+                if (spotifyConnected) {
+                    spotifyLoginButton.textContent = 'Spotify Verbunden';
+                    spotifyLoginButton.classList.remove('btn-outline-light', 'btn-danger');
+                    spotifyLoginButton.classList.add('btn-success');
+                } else {
+                    spotifyLoginButton.textContent = 'Mit Spotify anmelden';
+                    spotifyLoginButton.classList.remove('btn-outline-light', 'btn-success');
+                    spotifyLoginButton.classList.add('btn-danger');
+                }
+            }
+
+            function applyCurrentGenreToDropdown() {
+                if (playerName !== 'Phil') {
+                    return;
+                }
+                if (!genresLoaded) {
+                    return;
+                }
+                if (!currentGenre) {
+                    return;
+                }
+
+                // only set if the option exists
+                const match = Array.from(genreSelect.options).some(o => o && o.value === currentGenre);
+                if (match) {
+                    genreSelect.value = currentGenre;
+                }
+            }
+
+            function resetGenreSelect() {
+                genresLoaded = false;
+                genreSelect.replaceChildren();
+                const loadingOption = document.createElement('option');
+                loadingOption.value = '';
+                loadingOption.disabled = true;
+                loadingOption.selected = true;
+                loadingOption.textContent = 'Genres laden...';
+                genreSelect.appendChild(loadingOption);
+            }
+
+            async function ensureGenresLoaded() {
+                if (genresLoaded) {
+                    return;
+                }
+
+                resetGenreSelect();
+
+                try {
+                    const response = await fetch('/songs/catalog', { cache: 'no-store' });
+                    if (!response.ok) {
+                        throw new Error('Failed to load catalog');
+                    }
+                    const catalog = await response.json();
+                    const categories = Array.isArray(catalog && catalog.categories) ? catalog.categories : [];
+
+                    genreSelect.replaceChildren();
+
+                    const placeholder = document.createElement('option');
+                    placeholder.value = '';
+                    placeholder.selected = true;
+                    placeholder.disabled = true;
+                    placeholder.textContent = 'Genre auswählen...';
+                    genreSelect.appendChild(placeholder);
+
+                    for (const category of categories) {
+                        const label = ((category && category.label) || '').toString().trim();
+                        if (!label) {
+                            continue;
+                        }
+                        const option = document.createElement('option');
+                        option.value = label;
+                        option.textContent = label;
+                        genreSelect.appendChild(option);
+                    }
+
+                    genresLoaded = true;
+                    applyCurrentGenreToDropdown();
+                } catch (e) {
+                    // leave a disabled option so UX stays minimal but clear
+                    genreSelect.replaceChildren();
+                    const errorOption = document.createElement('option');
+                    errorOption.value = '';
+                    errorOption.disabled = true;
+                    errorOption.selected = true;
+                    errorOption.textContent = 'Genres konnten nicht geladen werden';
+                    genreSelect.appendChild(errorOption);
+                }
             }
 
             function setPlayerName(newName) {
@@ -252,6 +389,15 @@
                 setCookie('playerName', newName);
 
                 updateSpotifyLoginVisibility();
+
+                // reset spotify button state when switching users
+                if (playerName === 'Phil') {
+                    // keep whatever we already know; UI will update once state arrives
+                } else {
+                    spotifyLoginButton.textContent = 'Mit Spotify anmelden';
+                    spotifyLoginButton.classList.remove('btn-danger', 'btn-success');
+                    spotifyLoginButton.classList.add('btn-outline-light');
+                }
 
                 // tell server (or queue until WS is open)
                 pendingNameMessage = 'name:' + newName;
@@ -385,12 +531,30 @@
                         socket.send(pendingNameMessage);
                         pendingNameMessage = null;
                     }
+
+                    if (pendingGenreChangePayload) {
+                        socket.send(pendingGenreChangePayload);
+                        pendingGenreChangePayload = null;
+                    }
                 });
 
                 socket.addEventListener('message', (event) => {
                     console.log('WebSocket message:', event.data);
                     try {
                         const messageObject = JSON.parse(event.data);
+
+                        // Update current genre if present
+                        if (messageObject && typeof messageObject === 'object') {
+                            const maybeGenre = (messageObject.genreName || messageObject.genre || '').toString().trim();
+                            if (maybeGenre) {
+                                setCurrentGenre(maybeGenre);
+                            }
+
+                            if (Object.prototype.hasOwnProperty.call(messageObject, 'spotifyConnected')) {
+                                setSpotifyConnected(messageObject.spotifyConnected === true);
+                            }
+                        }
+
                         if (messageObject.type === 'firstGuesser') {
                             const answerButton = document.getElementById('answerButton');
                             answerButton.disabled = true;
@@ -424,6 +588,8 @@
 
                             setSongInfo(null);
                             hideSongLayer();
+                        } else if (messageObject.type === 'genreChange') {
+                            setCurrentGenre(messageObject.genreName);
                         }
                     } catch (err) {
                         // ignore non-JSON messages
@@ -452,6 +618,23 @@
                 console.log('WebSocket not open');
                 return false;
             }
+
+            genreSelect.addEventListener('change', () => {
+                const selected = (genreSelect && genreSelect.value || '').toString();
+                if (!selected) {
+                    return;
+                }
+
+                const payload = JSON.stringify({
+                    type: 'genreChange',
+                    genreName: selected
+                });
+
+                const sent = sendIfOpen(payload);
+                if (!sent) {
+                    pendingGenreChangePayload = payload;
+                }
+            });
 
             // initial connect
             connectWebSocket();

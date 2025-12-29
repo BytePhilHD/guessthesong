@@ -1,6 +1,7 @@
 package de.bytephil.guessthesong.websocket;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
 import java.util.EnumSet;
 import java.util.Map;
 import java.util.Set;
@@ -20,16 +21,21 @@ import de.bytephil.guessthesong.spotify.SpotifyService;
 import jakarta.servlet.http.HttpSession;
 import se.michaelthelin.spotify.SpotifyApi;
 import se.michaelthelin.spotify.enums.Action;
+import se.michaelthelin.spotify.model_objects.miscellaneous.CurrentlyPlaying;
 import se.michaelthelin.spotify.model_objects.miscellaneous.CurrentlyPlayingContext;
 import se.michaelthelin.spotify.model_objects.miscellaneous.Device;
 import se.michaelthelin.spotify.model_objects.special.Actions;
+import se.michaelthelin.spotify.model_objects.specification.ArtistSimplified;
 import se.michaelthelin.spotify.model_objects.specification.Disallows;
+import se.michaelthelin.spotify.model_objects.specification.Image;
+import se.michaelthelin.spotify.model_objects.specification.Track;
 
 @Component
 public class WebSocketHandler extends TextWebSocketHandler {
 
     private String guesserName = null;
     private String lastBroadcast = null;
+    private String selectedGenre = null;
 
     private final SpotifyService spotifyService;
 
@@ -81,6 +87,34 @@ public class WebSocketHandler extends TextWebSocketHandler {
         return device != null && Boolean.TRUE.equals(device.getSupports_volume());
     }
 
+    private static String artistsToText(ArtistSimplified[] artists) {
+        if (artists == null || artists.length == 0) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (ArtistSimplified a : artists) {
+            if (a == null || a.getName() == null || a.getName().isBlank()) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(", ");
+            }
+            sb.append(a.getName());
+        }
+        return sb.toString();
+    }
+
+    private static String firstAlbumImageUrl(Track track) {
+        if (track == null || track.getAlbum() == null) {
+            return null;
+        }
+        Image[] images = track.getAlbum().getImages();
+        if (images == null || images.length == 0 || images[0] == null) {
+            return null;
+        }
+        return images[0].getUrl();
+    }
+
     private SpotifyApi findSpotifyApiFromAnyConnectedSession() {
         try {
             SpotifyApi global = spotifyService.apiForGlobal();
@@ -121,8 +155,37 @@ public class WebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionEstablished(WebSocketSession session) throws IOException {
         sessions.add(session);
         session.sendMessage(new TextMessage("connected:" + session.getId()));
+
+        boolean spotifyConnected = spotifyService.getGlobalToken() != null;
+
+        // Always send current state (client can ignore unknown type)
+        Map<String, Object> state = new LinkedHashMap<>();
+        state.put("type", "state");
+        state.put("spotifyConnected", spotifyConnected);
+        if (selectedGenre != null) {
+            state.put("genreName", selectedGenre);
+        }
+        session.sendMessage(new TextMessage(objectMapper.writeValueAsString(state)));
+
         if (lastBroadcast != null) {
-            broadcast(lastBroadcast);
+            String trimmed = lastBroadcast.trim();
+            if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+                try {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> lastObj = objectMapper.readValue(trimmed, Map.class);
+                    // enrich last broadcast with current state
+                    lastObj.put("spotifyConnected", spotifyConnected);
+                    if (selectedGenre != null) {
+                        lastObj.put("genreName", selectedGenre);
+                    }
+                    session.sendMessage(new TextMessage(objectMapper.writeValueAsString(lastObj)));
+                } catch (Exception e) {
+                    // fall back to raw string
+                    session.sendMessage(new TextMessage(lastBroadcast));
+                }
+            } else {
+                session.sendMessage(new TextMessage(lastBroadcast));
+            }
         }
     }
 
@@ -130,12 +193,8 @@ public class WebSocketHandler extends TextWebSocketHandler {
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws IOException {
         final String payload = message.getPayload();
         logger.info("WS {} <- {}", session.getId(), payload);
-
-        // Minimal: echo back what the client sent
         session.sendMessage(new TextMessage("echo:" + payload));
 
-        // Minimal JSON -> Java object parsing
-        // Expected: {"type":"...","playerName":"..."}
         String jsonPayload = payload;
         if (jsonPayload != null && jsonPayload.startsWith("answer:")) {
             jsonPayload = jsonPayload.substring("answer:".length());
@@ -147,18 +206,25 @@ public class WebSocketHandler extends TextWebSocketHandler {
                 logger.info("WS {} -> type={}, playerName={}", session.getId(), clientMessage.type,
                         clientMessage.playerName);
 
-                if ("playerGuess".equals(clientMessage.type) && guesserName == null) {
+                if ("genreChange".equals(clientMessage.type)) {
+                    String newGenre = clientMessage.genreName;
+                    selectedGenre = (newGenre != null && !newGenre.isBlank()) ? newGenre : null;
+                    logger.info("WS {} -> Genre selected: {}", session.getId(), selectedGenre);
+                    String genreChangeJson = objectMapper.writeValueAsString(
+                            Map.of("type", "genreChange", "genreName", selectedGenre != null ? selectedGenre : ""));
+                    lastBroadcast = genreChangeJson;
+                    broadcast(genreChangeJson);
+                }
+
+                else if ("playerGuess".equals(clientMessage.type) && guesserName == null) {
                     guesserName = clientMessage.playerName;
                     logger.info("WS {} -> Guesser set to {}", session.getId(), guesserName);
 
-                    // Example: broadcast to everyone
                     String firstGuesserJson = objectMapper.writeValueAsString(
                             Map.of("type", "firstGuesser", "playerName", guesserName));
                     lastBroadcast = firstGuesserJson;
                     broadcast(firstGuesserJson);
 
-                    // Pause playback using ANY connected session that has a Spotify token (usually
-                    // the host/"Phil").
                     SpotifyApi api = findSpotifyApiFromAnyConnectedSession();
                     if (api == null) {
                         logger.info("WS {} -> No Spotify session connected (pause skipped)", session.getId());
@@ -175,7 +241,6 @@ public class WebSocketHandler extends TextWebSocketHandler {
                                 logger.info("WS {} -> spotify pause executed", session.getId());
                             }
                         } catch (Exception e) {
-                            // Often: 404 no active device, 403 missing scope, 402 premium required, etc.
                             logger.warn("WS {} -> spotify pause failed", session.getId(), e);
                         }
                     }
@@ -183,13 +248,7 @@ public class WebSocketHandler extends TextWebSocketHandler {
                 } else if ("showAnswer".equals(clientMessage.type)) {
                     // Handle show answer request
                     logger.info("WS {} -> Show answer requested by {}", session.getId(), clientMessage.playerName);
-                    // Implement logic to show the answer to all players
-                    String answerJson = objectMapper.writeValueAsString(
-                            Map.of("type", "answer", "songTitle", "TEST", "artistsText", "TEST ARTIST", "albumImageUrl",
-                                    "https://i.scdn.co/image/ab67616d0000b273e9b246fad384459a7b325b3b"));
-                    lastBroadcast = answerJson;
-                    broadcast(answerJson);
-                    guesserName = null;
+
                     SpotifyApi api = findSpotifyApiFromAnyConnectedSession();
                     if (api == null) {
                         logger.info("WS {} -> No Spotify session connected (resume skipped)", session.getId());
@@ -197,6 +256,27 @@ public class WebSocketHandler extends TextWebSocketHandler {
                         try {
                             CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
                             Boolean isPlaying = playback != null ? playback.getIs_playing() : null;
+
+                            CurrentlyPlaying current = api.getUsersCurrentlyPlayingTrack().build().execute();
+                            Track track = null;
+                            if (current != null && current.getItem() instanceof Track t) {
+                                track = t;
+                            }
+
+                            String songTitle = track != null ? track.getName() : null;
+                            String artistsText = track != null ? artistsToText(track.getArtists()) : "";
+                            String albumImageUrl = firstAlbumImageUrl(track);
+
+                            String answerJson = objectMapper.writeValueAsString(
+                                    Map.of(
+                                            "type", "answer",
+                                            "songTitle", songTitle != null ? songTitle : "",
+                                            "artistsText", artistsText,
+                                            "albumImageUrl", albumImageUrl != null ? albumImageUrl : ""));
+                            lastBroadcast = answerJson;
+                            broadcast(answerJson);
+                            guesserName = null;
+
                             if (Boolean.TRUE.equals(isPlaying)) {
                                 logger.info("WS {} -> spotify resume skipped (already playing)", session.getId());
                             } else if (!canResume(playback)) {
@@ -222,7 +302,6 @@ public class WebSocketHandler extends TextWebSocketHandler {
                     lastBroadcast = nextRoundJson;
                     broadcast(nextRoundJson);
                     guesserName = null;
-                    // TODO hier muss nächstes Lied geladen werden
 
                     SpotifyApi api = findSpotifyApiFromAnyConnectedSession();
                     if (api == null) {
@@ -230,20 +309,22 @@ public class WebSocketHandler extends TextWebSocketHandler {
                     } else {
                         try {
                             CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
-                            Boolean isPlaying = playback != null ? playback.getIs_playing() : null;
-                            if (Boolean.TRUE.equals(isPlaying)) {
-                                logger.info("WS {} -> spotify resume skipped (already playing)", session.getId());
-                                if (deviceSupportsVolume(playback)) {
-                                    api.setVolumeForUsersPlayback(100).build().execute();
-                                }
-                            } else if (!canResume(playback)) {
-                                logger.info("WS {} -> spotify resume skipped (disallowed by Spotify)", session.getId());
+
+                            var searchResult = api.searchTracks("End of You - Amy Lee, Poppy")
+                                    .limit(1)
+                                    .build()
+                                    .execute();
+                            Track[] foundTracks = searchResult != null ? searchResult.getItems() : null;
+                            Track track = (foundTracks != null && foundTracks.length > 0) ? foundTracks[0] : null;
+                            if (track == null) {
+                                logger.info("WS {} -> Spotify search returned no tracks", session.getId());
                             } else {
-                                api.startResumeUsersPlayback().build().execute();
-                                if (deviceSupportsVolume(playback)) {
-                                    api.setVolumeForUsersPlayback(100).build().execute();
-                                }
-                                logger.info("WS {} -> spotify resume executed", session.getId());
+                                api.addItemToUsersPlaybackQueue(track.getUri()).build().execute();
+                                api.skipUsersPlaybackToNextTrack().build().execute();
+                            }
+
+                            if (deviceSupportsVolume(playback)) {
+                                api.setVolumeForUsersPlayback(100).build().execute();
                             }
                         } catch (Exception e) {
                             logger.warn("WS {} -> spotify resume failed", session.getId(), e);
@@ -264,6 +345,9 @@ public class WebSocketHandler extends TextWebSocketHandler {
                             CurrentlyPlayingContext playback = safeGetPlayback(api, session.getId());
                             Boolean isPlaying = playback != null ? playback.getIs_playing() : null;
                             if (Boolean.TRUE.equals(isPlaying)) {
+                                if (deviceSupportsVolume(playback)) {
+                                    api.setVolumeForUsersPlayback(100).build().execute();
+                                }
                                 logger.info("WS {} -> spotify resume skipped (already playing)", session.getId());
                             } else if (!canResume(playback)) {
                                 logger.info("WS {} -> spotify resume skipped (disallowed by Spotify)", session.getId());

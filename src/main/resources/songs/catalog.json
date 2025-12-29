@@ -1,0 +1,59 @@
+{
+    "version": 1,
+    "categories": [
+        {
+            "id": "rock",
+            "label": "Rock",
+            "songs": [
+                {
+                    "title": "Smells Like Teen Spirit",
+                    "artists": [
+                        "Nirvana"
+                    ]
+                },
+                {
+                    "title": "Back In Black",
+                    "artists": [
+                        "AC/DC"
+                    ]
+                }
+            ]
+        },
+        {
+            "id": "pop",
+            "label": "Pop",
+            "songs": [
+                {
+                    "title": "Bad Guy",
+                    "artists": [
+                        "Billie Eilish"
+                    ]
+                },
+                {
+                    "title": "Blinding Lights",
+                    "artists": [
+                        "The Weeknd"
+                    ]
+                }
+            ]
+        },
+        {
+            "id": "electronic",
+            "label": "Electronic",
+            "songs": [
+                {
+                    "title": "One More Time",
+                    "artists": [
+                        "Daft Punk"
+                    ]
+                },
+                {
+                    "title": "Strobe",
+                    "artists": [
+                        "deadmau5"
+                    ]
+                }
+            ]
+        }
+    ]
+}
