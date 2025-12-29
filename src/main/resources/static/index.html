@@ -200,6 +200,12 @@
             <select id="genreSelect" class="form-select mt-2" aria-label="Genre auswählen">
                 <option value="" selected disabled>Genres laden...</option>
             </select>
+
+            <div id="playlistEditor" class="mt-2" hidden>
+                <label for="playlistUriInput" class="form-label text-light mb-1">Playlist (URI oder Link)</label>
+                <input id="playlistUriInput" class="form-control" type="text"
+                    placeholder="spotify:playlist:... oder https://open.spotify.com/playlist/..." autocomplete="off">
+            </div>
             <button id="newGameButton" class="btn btn-outline-light w-100 mt-2" type="button">Neues Spiel starten</button>
         </div>
     </main>
@@ -254,6 +260,8 @@
             const spotifyLoginButton = document.getElementById('spotifyLoginButton');
             const genreSelect = document.getElementById('genreSelect');
             const genreSubtitle = document.getElementById('genreSubtitle');
+            const playlistEditor = document.getElementById('playlistEditor');
+            const playlistUriInput = document.getElementById('playlistUriInput');
             const newGameButton = document.getElementById('newGameButton');
 
             let playerName = null;
@@ -270,6 +278,148 @@
                 { value: 'pop', label: 'Pop' },
                 { value: 'electronic', label: 'Electronic' }
             ];
+
+            const DEFAULT_PLAYLIST_URIS_BY_GENRE = {
+                rock: 'spotify:playlist:37i9dQZF1DX4vth7idTQch',
+                pop: 'spotify:playlist:2OFfgjs6kj0eA6FNayhAAJ',
+                electronic: 'spotify:playlist:3tRhisNDv5YZXPQltBbJNc'
+            };
+
+            const LEGACY_DEFAULT_PLAYLIST_URIS_BY_GENRE = {
+                rock: 'spotify:playlist:6pNlO5t2Rg7XrldHrsYbA7',
+                pop: '',
+                electronic: ''
+            };
+
+            const PLAYLIST_URIS_STORAGE_KEY = 'playlistUrisByGenre';
+
+            function extractSpotifyPlaylistId(text) {
+                const raw = (text || '').toString().trim();
+                if (!raw) {
+                    return null;
+                }
+
+                // spotify:playlist:<id>
+                const uriMatch = raw.match(/^spotify:playlist:([A-Za-z0-9]{22})$/);
+                if (uriMatch) {
+                    return uriMatch[1];
+                }
+
+                // 22-char id
+                const idMatch = raw.match(/^([A-Za-z0-9]{22})$/);
+                if (idMatch) {
+                    return idMatch[1];
+                }
+
+                // open.spotify.com/playlist/<id> (+ params)
+                const urlLikeMatch = raw.match(/open\.spotify\.com\/playlist\/([A-Za-z0-9]{22})/);
+                if (urlLikeMatch) {
+                    return urlLikeMatch[1];
+                }
+
+                try {
+                    const u = new URL(raw);
+                    const pathname = (u.pathname || '').toString();
+                    const m = pathname.match(/\/playlist\/([A-Za-z0-9]{22})/);
+                    if (m) {
+                        return m[1];
+                    }
+                } catch (e) {
+                    // ignore
+                }
+
+                return null;
+            }
+
+            function normalizePlaylistContextUri(input) {
+                const trimmed = (input || '').toString().trim();
+                if (!trimmed) {
+                    return '';
+                }
+                const id = extractSpotifyPlaylistId(trimmed);
+                if (!id) {
+                    return null;
+                }
+                return `spotify:playlist:${id}`;
+            }
+
+            function loadPlaylistUrisByGenre() {
+                let stored = {};
+                let hasStoredValue = false;
+                try {
+                    const raw = localStorage.getItem(PLAYLIST_URIS_STORAGE_KEY);
+                    if (raw) {
+                        const parsed = JSON.parse(raw);
+                        if (parsed && typeof parsed === 'object') {
+                            stored = parsed;
+                            hasStoredValue = true;
+                        }
+                    }
+                } catch (e) {
+                    // ignore
+                }
+
+                // Defaults first, then overlay stored values.
+                const merged = {
+                    ...DEFAULT_PLAYLIST_URIS_BY_GENRE,
+                    ...stored
+                };
+
+                // Migration: if localStorage still contains the old defaults, replace them with new defaults.
+                if (hasStoredValue) {
+                    for (const k of Object.keys(DEFAULT_PLAYLIST_URIS_BY_GENRE)) {
+                        const key = k;
+                        const current = (merged[key] || '').toString().trim();
+                        const legacy = (LEGACY_DEFAULT_PLAYLIST_URIS_BY_GENRE[key] || '').toString().trim();
+                        if (current === legacy) {
+                            merged[key] = DEFAULT_PLAYLIST_URIS_BY_GENRE[key];
+                        }
+                    }
+                }
+
+                return merged;
+            }
+
+            function savePlaylistUrisByGenre(map) {
+                try {
+                    localStorage.setItem(PLAYLIST_URIS_STORAGE_KEY, JSON.stringify(map || {}));
+                } catch (e) {
+                    // ignore
+                }
+            }
+
+            function getPlaylistUriForGenre(genreValue) {
+                const key = normalizeGenreValue(genreValue);
+                if (!key) {
+                    return '';
+                }
+                const map = loadPlaylistUrisByGenre();
+                const value = (map && map[key] != null) ? map[key] : '';
+                return (value || '').toString().trim();
+            }
+
+            function setPlaylistEditorVisible(visible) {
+                if (!playlistEditor) {
+                    return;
+                }
+                playlistEditor.hidden = !visible;
+            }
+
+            function syncPlaylistInputForCurrentGenre() {
+                if (playerName !== 'Phil') {
+                    setPlaylistEditorVisible(false);
+                    return;
+                }
+                if (!genresLoaded || !currentGenre) {
+                    setPlaylistEditorVisible(false);
+                    return;
+                }
+
+                setPlaylistEditorVisible(true);
+                if (playlistUriInput) {
+                    playlistUriInput.value = getPlaylistUriForGenre(currentGenre);
+                }
+            }
 
             function normalizeGenreValue(value) {
                 const v = (value || '').toString().trim().toLowerCase();
@@ -297,6 +447,7 @@
                 } else {
                     // keep dropdown quiet for non-Phil users
                     resetGenreSelect();
+                    setPlaylistEditorVisible(false);
                 }
             }
 
@@ -309,6 +460,8 @@
                     ensureGenresLoaded();
                     applyCurrentGenreToDropdown();
                 }
+
+                syncPlaylistInputForCurrentGenre();
             }
 
             function setSpotifyConnected(newValue) {
@@ -386,6 +539,32 @@
 
                 genresLoaded = true;
                 applyCurrentGenreToDropdown();
+                syncPlaylistInputForCurrentGenre();
+            }
+
+            if (playlistUriInput) {
+                playlistUriInput.addEventListener('change', () => {
+                    if (playerName !== 'Phil') {
+                        return;
+                    }
+                    if (!currentGenre) {
+                        return;
+                    }
+
+                    const raw = (playlistUriInput.value || '').toString();
+                    const normalized = normalizePlaylistContextUri(raw);
+
+                    if (normalized === null) {
+                        window.alert('Ungültige Playlist URL/URI. Bitte einen Spotify Playlist-Link oder eine spotify:playlist:... URI einfügen.');
+                        playlistUriInput.value = getPlaylistUriForGenre(currentGenre);
+                        return;
+                    }
+
+                    const map = loadPlaylistUrisByGenre();
+                    map[currentGenre] = normalized;
+                    savePlaylistUrisByGenre(map);
+                    playlistUriInput.value = normalized;
+                });
             }
 
             function setPlayerName(newName) {
@@ -636,9 +815,14 @@
                     return;
                 }
 
+                setCurrentGenre(selected);
+
+                const playlistContextUri = getPlaylistUriForGenre(selected);
+
                 const payload = JSON.stringify({
                     type: 'genreChange',
-                    genreName: selected
+                    genreName: selected,
+                    playlistContextUri: playlistContextUri
                 });
 
                 const sent = sendIfOpen(payload);
@@ -665,12 +849,14 @@
                 }
 
                 const genreName = selectedGenre;
+                const playlistContextUri = getPlaylistUriForGenre(genreName);
 
                 const payload = JSON.stringify({
                     type: 'newGame',
                     playerName: playerName
                     ,
-                    genreName: genreName
+                    genreName: genreName,
+                    playlistContextUri: playlistContextUri
                 });
 
                 const sent = sendIfOpen(payload);

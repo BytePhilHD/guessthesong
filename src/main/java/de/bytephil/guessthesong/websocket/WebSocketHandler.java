@@ -53,9 +53,9 @@ public class WebSocketHandler extends TextWebSocketHandler {
          * spotify:playlist:37i9dQZF1DXcF6B6QPhFDv
          */
         private static final Map<String, String> GENRE_PLAYLIST_CONTEXT_URIS = Map.of(
-            "rock", "spotify:playlist:6pNlO5t2Rg7XrldHrsYbA7",
-            "pop", "",
-            "electronic", "");
+            "rock", "spotify:playlist:37i9dQZF1DX4vth7idTQch",
+            "pop", "spotify:playlist:2OFfgjs6kj0eA6FNayhAAJ",
+            "electronic", "spotify:playlist:3tRhisNDv5YZXPQltBbJNc");
 
     private static final Logger logger = LoggerFactory.getLogger(WebSocketHandler.class);
 
@@ -92,6 +92,36 @@ public class WebSocketHandler extends TextWebSocketHandler {
             return null;
         }
         return ctx.trim();
+    }
+
+    private static String normalizePlaylistContextUriFromClient(String input) {
+        if (input == null) {
+            return null;
+        }
+        String trimmed = input.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+
+        // spotify:playlist:<id>
+        if (trimmed.matches("^spotify:playlist:[A-Za-z0-9]{22}$")) {
+            return trimmed;
+        }
+
+        // bare 22-char id
+        if (trimmed.matches("^[A-Za-z0-9]{22}$")) {
+            return "spotify:playlist:" + trimmed;
+        }
+
+        // open.spotify.com/playlist/<id>
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("open\\.spotify\\.com/playlist/([A-Za-z0-9]{22})")
+                .matcher(trimmed);
+        if (m.find()) {
+            return "spotify:playlist:" + m.group(1);
+        }
+
+        return null;
     }
 
     private static String normalizeLabel(String s) {
@@ -305,7 +335,11 @@ public class WebSocketHandler extends TextWebSocketHandler {
                                     return;
                                 }
 
-                                String playlistCtx = playlistContextUriForGenre(selectedGenre);
+                                String playlistCtx = normalizePlaylistContextUriFromClient(
+                                        clientMessage.playlistContextUri);
+                                if (playlistCtx == null) {
+                                    playlistCtx = playlistContextUriForGenre(selectedGenre);
+                                }
                                 if (playlistCtx == null) {
                                     logger.info("WS {} -> No playlist configured for genre='{}' (newGame skipped)",
                                             session.getId(), selectedGenre);
