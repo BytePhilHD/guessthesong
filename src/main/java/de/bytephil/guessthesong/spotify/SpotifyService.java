@@ -3,8 +3,11 @@ package de.bytephil.guessthesong.spotify;
 import java.net.URI;
 import java.time.Instant;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PostConstruct;
 import se.michaelthelin.spotify.SpotifyApi;
 import se.michaelthelin.spotify.exceptions.SpotifyWebApiException;
 import se.michaelthelin.spotify.model_objects.credentials.AuthorizationCodeCredentials;
@@ -13,6 +16,8 @@ import jakarta.servlet.http.HttpSession;
 
 @Service
 public class SpotifyService {
+
+    private static final Logger logger = LoggerFactory.getLogger(SpotifyService.class);
 
     public static final String SESSION_TOKEN_KEY = "SPOTIFY_TOKEN";
     public static final String SESSION_STATE_KEY = "SPOTIFY_OAUTH_STATE";
@@ -26,6 +31,24 @@ public class SpotifyService {
 
     public SpotifyService(SpotifyProperties properties) {
         this.properties = properties;
+    }
+
+    @PostConstruct
+    void initGlobalTokenFromConfig() {
+        String refreshToken = properties.getGlobalRefreshToken();
+        if (refreshToken == null || refreshToken.isBlank()) {
+            return;
+        }
+
+        // Mark as expired so refreshGlobal() will fetch a fresh access token.
+        globalToken = new SpotifySessionToken(null, refreshToken.trim(), 0);
+        try {
+            refreshGlobal();
+            logger.info("Initialized global Spotify token from config refresh token");
+        } catch (Exception e) {
+            globalToken = null;
+            logger.warn("Failed to initialize global Spotify token from config (global token disabled)", e);
+        }
     }
 
     public SpotifyApi newBaseApi() {

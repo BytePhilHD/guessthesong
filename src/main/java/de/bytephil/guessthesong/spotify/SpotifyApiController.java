@@ -44,6 +44,8 @@ public class SpotifyApiController {
                 "activeProfiles", profiles,
                 "clientIdPresent", spotifyProperties.getClientId() != null && !spotifyProperties.getClientId().isBlank(),
                 "clientSecretPresent", spotifyProperties.getClientSecret() != null && !spotifyProperties.getClientSecret().isBlank(),
+            "globalRefreshTokenPresent", spotifyProperties.getGlobalRefreshToken() != null
+                && !spotifyProperties.getGlobalRefreshToken().isBlank(),
                 "redirectUri", spotifyProperties.getRedirectUri(),
                 "scopes", spotifyProperties.getScopes());
     }

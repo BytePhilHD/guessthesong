@@ -34,3 +34,6 @@ build/
 
 # Local Spring Boot profile (secrets)
 src/main/resources/application-local.properties
+
+# External config auto-created on first startup
+config/application.properties

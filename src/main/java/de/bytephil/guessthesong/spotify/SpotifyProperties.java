@@ -10,6 +10,11 @@ public class SpotifyProperties {
     private String redirectUri;
     private String scopes;
     private boolean pauseOnConnect;
+    /**
+     * Optional: a long-lived refresh token to allow the backend to control Spotify
+     * without a browser session login.
+     */
+    private String globalRefreshToken;
 
     public String getClientId() {
         return clientId;
@@ -49,5 +54,13 @@ public class SpotifyProperties {
 
     public void setPauseOnConnect(boolean pauseOnConnect) {
         this.pauseOnConnect = pauseOnConnect;
+    }
+
+    public String getGlobalRefreshToken() {
+        return globalRefreshToken;
+    }
+
+    public void setGlobalRefreshToken(String globalRefreshToken) {
+        this.globalRefreshToken = globalRefreshToken;
     }
 }
